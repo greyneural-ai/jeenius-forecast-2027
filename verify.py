@@ -22,7 +22,10 @@ Usage:
 ``{"ordinal": 1, "salt": "<64 hex>", "item": {...}}``. The script prints the
 file's SHA-256 fingerprint, then one line per object: ``OK``, ``MISMATCH``,
 ``UNKNOWN`` (no such ordinal in the file) or ``BAD`` (the object itself is
-malformed). It exits 0 only when every object is OK.
+malformed). A ``MISMATCH`` or ``UNKNOWN`` line also names the line the item's
+commitment is on, when it is in the file under another ordinal. A reveal file
+with a repeated key in any object is refused. It exits 0 only when every
+object is OK.
 
 Standard library only; Python 3.8 or later.
 """
@@ -42,7 +45,13 @@ def nfc(obj):
     if isinstance(obj, str):
         return unicodedata.normalize("NFC", obj)
     if isinstance(obj, dict):
-        return {nfc(k): nfc(v) for k, v in obj.items()}
+        out = {}
+        for key, value in obj.items():
+            key = nfc(key)
+            if key in out:
+                raise ValueError("two keys are the same after NFC normalisation: %r" % (key,))
+            out[key] = nfc(value)
+        return out
     if isinstance(obj, (list, tuple)):
         return [nfc(v) for v in obj]
     return obj
@@ -123,7 +132,16 @@ def file_fingerprint(path):
     return digest.hexdigest()
 
 
-def _check(record, lines):
+def _no_duplicate_keys(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate key %r in the reveal file" % (key,))
+        out[key] = value
+    return out
+
+
+def _check(record, lines, where):
     if not isinstance(record, dict):
         return "BAD ??????: not an object"
     ordinal = record.get("ordinal")
@@ -137,9 +155,12 @@ def _check(record, lines):
         computed = commitment(item, record.get("salt"))
     except ValueError as exc:
         return "BAD %s: %s" % (label, exc)
-    if ordinal not in lines:
-        return "UNKNOWN %s" % label
-    return ("OK %s" if lines[ordinal] == computed else "MISMATCH %s") % label
+    if lines.get(ordinal) == computed:
+        return "OK %s" % label
+    verdict = ("MISMATCH %s" if ordinal in lines else "UNKNOWN %s") % label
+    if computed in where:
+        verdict += ": this item's commitment is on line %06d" % where[computed]
+    return verdict
 
 
 def main(argv=None):
@@ -149,16 +170,21 @@ def main(argv=None):
         return 2
     commitments_path, reveal_path = argv
     try:
-        with open(commitments_path, encoding="utf-8") as fh:
-            _, lines = read_commitments(fh.read())
+        with open(commitments_path, "rb") as fh:
+            raw = fh.read()
+        _, lines = read_commitments(raw.decode("utf-8"))
         with open(reveal_path, encoding="utf-8") as fh:
-            reveal = json.load(fh)
+            reveal = json.load(fh, object_pairs_hook=_no_duplicate_keys)
     except (OSError, ValueError) as exc:
         print("error: %s" % exc, file=sys.stderr)
         return 2
+    if b"\r" in raw:
+        print("warning: this copy has CRLF line endings, so its fingerprint is not the published one;"
+              " compare against the raw file from the repository", file=sys.stderr)
     records = reveal if isinstance(reveal, list) else [reveal]
+    where = {value: ordinal for ordinal, value in lines.items()}
     print("fingerprint " + file_fingerprint(commitments_path))
-    verdicts = [_check(record, lines) for record in records]
+    verdicts = [_check(record, lines, where) for record in records]
     for verdict in verdicts:
         print(verdict)
     return 0 if verdicts and all(v.startswith("OK ") for v in verdicts) else 1

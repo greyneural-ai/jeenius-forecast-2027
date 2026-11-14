@@ -6,6 +6,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -63,6 +64,10 @@ class CanonicalTest(unittest.TestCase):
             verify.canonical({"w": [1, {"x": float("nan")}]})
         self.assertEqual(verify.canonical({"c": True, "n": None}), b'{"c":true,"n":null}')
 
+    def test_keys_that_collide_under_nfc_are_refused(self):
+        with self.assertRaises(ValueError):
+            verify.canonical({"é": 1, "é": 2})
+
 
 class CommitmentTest(unittest.TestCase):
     def test_commitment_known_vector(self):
@@ -104,14 +109,50 @@ class CliTest(unittest.TestCase):
         with open(self.commitments, "w", encoding="utf-8") as fh:
             fh.write(_sample(lines=["000001 " + good, "000002 " + "b" * 64]))
 
-    def run_cli(self, reveal, indent=None):
+    def run_cli(self, reveal, indent=None, commitments=None):
+        return self.run_cli_text(json.dumps(reveal, ensure_ascii=False, indent=indent), commitments)
+
+    def run_cli_text(self, text, commitments=None):
         path = os.path.join(self.tmp.name, "reveal.json")
         with open(path, "w", encoding="utf-8") as fh:
-            json.dump(reveal, fh, ensure_ascii=False, indent=indent)
+            fh.write(text)
         return subprocess.run(
-            [sys.executable, os.path.join(ROOT, "verify.py"), self.commitments, path],
+            [sys.executable, os.path.join(ROOT, "verify.py"), commitments or self.commitments, path],
             capture_output=True, text=True,
         )
+
+    def write_commitments(self, lines, newline="\n"):
+        path = os.path.join(self.tmp.name, "other.txt")
+        with open(path, "wb") as fh:
+            fh.write(_sample(lines=lines).replace("\n", newline).encode("utf-8"))
+        return path
+
+    def test_cli_refuses_duplicate_keys(self):
+        good = json.dumps(ITEM, ensure_ascii=False)
+        text = '{"ordinal": 1, "salt": "%s", "item": {"question": "SHOWN TO READER", %s}' % (SALT, good[1:])
+        res = self.run_cli_text(text)
+        self.assertNotEqual(res.returncode, 0)
+        self.assertNotIn("OK 000001", res.stdout)
+        self.assertIn("duplicate key", res.stderr)
+        self.assertNotIn("Traceback", res.stderr)
+
+    def test_cli_warns_on_crlf_copy(self):
+        path = self.write_commitments(["000001 " + verify.commitment(ITEM, SALT), "000002 " + "b" * 64],
+                                      newline="\r\n")
+        res = self.run_cli({"ordinal": 1, "salt": SALT, "item": ITEM}, commitments=path)
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        self.assertIn("OK 000001", res.stdout)
+        self.assertIn("CRLF", res.stderr)
+
+    def test_cli_names_the_line_a_misnumbered_item_is_on(self):
+        path = self.write_commitments(["000001 " + "b" * 64, "000002 " + verify.commitment(ITEM, SALT)])
+        wrong = self.run_cli({"ordinal": 1, "salt": SALT, "item": ITEM}, commitments=path)
+        self.assertEqual(wrong.returncode, 1)
+        self.assertIn("MISMATCH 000001", wrong.stdout)
+        self.assertIn("000002", wrong.stdout)
+        unknown = self.run_cli({"ordinal": 99, "salt": SALT, "item": ITEM}, commitments=path)
+        self.assertIn("UNKNOWN 000099", unknown.stdout)
+        self.assertIn("000002", unknown.stdout)
 
     def test_cli_ok_and_mismatch(self):
         ok = self.run_cli({"ordinal": 1, "salt": SALT, "item": ITEM})
@@ -140,6 +181,25 @@ class CliTest(unittest.TestCase):
         self.assertEqual(res.returncode, 1)
         self.assertTrue(any(l.startswith("BAD 000001:") for l in res.stdout.splitlines()), res.stdout)
         self.assertNotIn("Traceback", res.stderr)
+
+
+def _git(*args):
+    return subprocess.run(["git", "-C", ROOT, *args], capture_output=True, text=True)
+
+
+IN_GIT = bool(shutil.which("git")) and _git("rev-parse", "--show-toplevel").stdout.strip() == os.path.realpath(ROOT)
+
+
+@unittest.skipUnless(IN_GIT, "not run from a git checkout of this repository")
+class RepoTest(unittest.TestCase):
+    def test_commitments_are_checked_out_byte_for_byte(self):
+        out = _git("check-attr", "text", "--", "commitments/2027-v1.txt", "commitments/2027-v1.txt.ots").stdout
+        self.assertIn("commitments/2027-v1.txt: text: unset", out)
+        self.assertIn("commitments/2027-v1.txt.ots: text: unset", out)
+
+    def test_private_records_cannot_be_added_by_accident(self):
+        self.assertEqual(_git("check-ignore", "-q", "--no-index", "2027-v1.jsonl").returncode, 0)
+        self.assertEqual(_git("check-ignore", "-q", "--no-index", "private/export.json").returncode, 0)
 
 
 if __name__ == "__main__":

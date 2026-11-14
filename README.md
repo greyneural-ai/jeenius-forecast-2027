@@ -37,6 +37,12 @@ sha256(commitments/2027-v1.txt) = 458e0cf6d88ee85f596ea3bced834e2f7ee15ae6695ddc
 Check it with `shasum -a 256 commitments/2027-v1.txt` (macOS) or
 `sha256sum commitments/2027-v1.txt` (Linux).
 
+Check the bytes as published: download the raw file, or clone with git. This
+repository's `.gitattributes` stops git from changing line endings in
+`commitments/`. A copy whose line endings were changed to CRLF, for example by
+an editor or a zip tool on Windows, has a different fingerprint and fails the
+timestamp check. `verify.py` warns when it reads such a copy.
+
 ## How each commitment was made
 
 ```
@@ -71,8 +77,10 @@ python3 verify.py commitments/2027-v1.txt reveal.json
 
 It prints the file's fingerprint, then one line per object: `OK`, `MISMATCH`,
 `UNKNOWN` (no such line number in the file) or `BAD` (the object itself is
-malformed). It exits 0 only when every object is `OK`. Key order and spacing
-in `reveal.json` do not matter.
+malformed). If the item's commitment is in the file under another line number,
+the `MISMATCH` or `UNKNOWN` line says which. It exits 0 only when every object
+is `OK`. Key order and spacing in `reveal.json` do not matter. A repeated key
+in any object is refused, so what a reader sees is what is checked.
 
 ## How to check the timestamp
 
