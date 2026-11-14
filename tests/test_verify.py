@@ -6,6 +6,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -193,13 +194,26 @@ IN_GIT = bool(shutil.which("git")) and _git("rev-parse", "--show-toplevel").stdo
 @unittest.skipUnless(IN_GIT, "not run from a git checkout of this repository")
 class RepoTest(unittest.TestCase):
     def test_commitments_are_checked_out_byte_for_byte(self):
-        out = _git("check-attr", "text", "--", "commitments/2027-v1.txt", "commitments/2027-v1.txt.ots").stdout
-        self.assertIn("commitments/2027-v1.txt: text: unset", out)
-        self.assertIn("commitments/2027-v1.txt.ots: text: unset", out)
+        paths = ["commitments/2027-v1.txt", "commitments/2027-v1.txt.ots",
+                 "commitments/neet-2027-v1.txt", "commitments/neet-2027-v1.txt.ots"]
+        out = _git("check-attr", "text", "--", *paths).stdout
+        for path in paths:
+            self.assertIn("%s: text: unset" % path, out)
 
     def test_private_records_cannot_be_added_by_accident(self):
-        self.assertEqual(_git("check-ignore", "-q", "--no-index", "2027-v1.jsonl").returncode, 0)
-        self.assertEqual(_git("check-ignore", "-q", "--no-index", "private/export.json").returncode, 0)
+        for path in ("2027-v1.jsonl", "neet-2027-v1.jsonl", "private/export.json",
+                     "private/export-neet-2027-v1.json"):
+            self.assertEqual(_git("check-ignore", "-q", "--no-index", path).returncode, 0, path)
+
+    def test_readme_fingerprints_match_files(self):
+        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
+            stated = dict(re.findall(r"sha256\((commitments/[\w.-]+\.txt)\) = ([0-9a-f]{64})", fh.read()))
+        present = {"commitments/" + name for name in os.listdir(os.path.join(ROOT, "commitments"))
+                   if name.endswith(".txt")}
+        self.assertTrue(present)
+        self.assertEqual(set(stated), present, "every commitments file needs one fingerprint line")
+        for path, digest in stated.items():
+            self.assertEqual(verify.file_fingerprint(os.path.join(ROOT, path)), digest, path)
 
 
 if __name__ == "__main__":
